@@ -1,0 +1,18 @@
+{
+  "background_color": "#FFF",
+  "display": "standalone",
+  "name": "Near wes",
+  "short_name": "Near wes",
+  "version": "com.nearsolution.wes",
+  "description": "Nearsolution wes App",
+  "author": "Nearslution wes Team",
+  "icons": [
+    {
+      "src": "res/icon/android/logo.png",
+      "type": "image/png",
+      "sizes": "undefinedxundefined"
+    }
+  ],
+  "orientation": "any",
+  "start_url": "index.html"
+}

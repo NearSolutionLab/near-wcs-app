@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='utf-8'?>
+<widget id="com.nearsolution.wes" version="1.0.0" xmlns="http://www.w3.org/ns/widgets" xmlns:android="http://schemas.android.com/apk/res/android" xmlns:cdv="http://cordova.apache.org/ns/1.0">
+    <name>Near wes</name>
+    <description>Nearsolution wes App</description>
+    <allow-navigation href="http://192.168.50.238:3200" />
+    <author email="suppor@nearsolution.co.kr" href="www.nearsolution.co.kr">
+        Nearslution wes Team
+    </author>
+    <content src="index.html" />
+    <access origin="*" />
+    <allow-intent href="http://*/*" />
+    <allow-intent href="https://*/*" />
+    <allow-intent href="tel:*" />
+    <allow-intent href="sms:*" />
+    <allow-intent href="mailto:*" />
+    <allow-intent href="geo:*" />
+    <icon src="res/icon/android/logo.png" />
+    <preference name="Orientation" value="default" />
+    <preference name="DisallowOverscroll" value="true" />
+    <preference name="AndroidWindowSplashScreenAnimatedIcon" value="res/icon/android/splashscreen.png" />
+</widget>
