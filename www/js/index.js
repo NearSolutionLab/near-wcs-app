@@ -29,31 +29,113 @@
 // }
 
 var app = {
-  initialize: function () {
-    this.bindEvents();
-  },
-  bindEvents: function () {
-    document.addEventListener("deviceready", this.onDeviceReady, false);
-  },
-  onDeviceReady: function () {
-    app.receivedEvent("deviceready");
+    inAppBrowserRef: null,
 
-    var targetUrl = "http://183.99.7.38:8033";
-    var bkpLink = document.getElementById("bkpLink");
-    bkpLink.setAttribute("href", targetUrl);
-    bkpLink.text = targetUrl;
-    window.location.replace(targetUrl);
-  },
-  receivedEvent: function (id) {
-    var parentElement = document.getElementById(id);
-    var listeningElement = parentElement.querySelector(".listening");
-    var receivedElement = parentElement.querySelector(".received");
+    initialize: function () {
+        this.bindEvents();
+    },
 
-    listeningElement.setAttribute("style", "display:none;");
-    receivedElement.setAttribute("style", "display:block;");
+    bindEvents: function () {
+        document.addEventListener("deviceready", this.onDeviceReady.bind(this), false);
 
-    console.log("Received Event: " + id);
-  },
+        function bind(id, event, handler) {
+            var el = document.getElementById(id);
+            if (el) {
+                el.addEventListener(event, handler.bind(app), false);
+            } else {
+                alert('Binding failed for element: ' + id);
+            }
+        }
+
+        bind('settings-btn', 'click', this.toggleSettings);
+        bind('saveAddress', 'click', this.saveAddress);
+    },
+
+    onDeviceReady: function () {
+        var serverAddress = localStorage.getItem("serverAddress");
+        var addressInput = document.getElementById("serverAddress");
+
+        if (serverAddress && addressInput) {
+            addressInput.value = serverAddress;
+            this.loadUrlInBrowser(this.prepareUrl(serverAddress));
+        } else if (addressInput) {
+            this.toggleSettings();
+        }
+    },
+
+    toggleSettings: function() {
+        var panel = document.getElementById('settings-panel');
+        if (panel) {
+            if (panel.style.display === 'none' || panel.style.display === '') {
+                panel.style.display = 'block';
+            } else {
+                panel.style.display = 'none';
+            }
+        }
+    },
+
+    loadUrlInBrowser: function(url) {
+        if (app.inAppBrowserRef) {
+            app.inAppBrowserRef.executeScript({ code: `window.location.href = "${url}"` });
+        } else {
+            var browser = cordova.InAppBrowser.open(url, '_blank', 'location=no,hidden=yes,toolbar=no');
+            app.inAppBrowserRef = browser;
+
+            browser.addEventListener('loadstop', function(event) {
+                if (event.url.includes('/#/login')) {
+                    browser.executeScript({
+                        code: "(function(){if(document.getElementById('gemini-change-ip-btn'))return;var b=document.createElement('button');b.innerHTML='IP 변경';b.id='gemini-change-ip-btn';b.style.cssText='position:fixed;bottom:20px;right:20px;z-index:10000;padding:10px 20px;background-color:#007bff;color:white;border:none;border-radius:5px;font-size:16px;';document.body.appendChild(b);b.onclick=function(){var m={type:'change_ip_request'};webkit.messageHandlers.cordova_iab.postMessage(JSON.stringify(m))}})()"
+                    });
+                } else {
+                    browser.executeScript({ code: `var b=document.getElementById('gemini-change-ip-btn');if(b)b.parentNode.removeChild(b);` });
+                }
+                browser.show();
+            });
+
+            browser.addEventListener('message', function(params) {
+                if (params.data && params.data.type === 'change_ip_request') {
+                    app.promptForNewIpAndReload();
+                }
+            });
+
+            browser.addEventListener('loaderror', function(event) {
+                alert('Page failed to load!\nURL: ' + event.url + '\nCode: ' + event.code + '\nMessage: ' + event.message);
+            });
+
+            browser.addEventListener('exit', function() {
+                app.inAppBrowserRef = null;
+            });
+        }
+    },
+
+    promptForNewIpAndReload: function() {
+        var newIp = prompt("새로운 IP 주소를 입력하세요:", localStorage.getItem("serverAddress") || "");
+        if (newIp) {
+            localStorage.setItem("serverAddress", newIp);
+            document.getElementById("serverAddress").value = newIp;
+            this.loadUrlInBrowser(this.prepareUrl(newIp));
+        }
+    },
+
+    saveAddress: function() {
+        var addressInput = document.getElementById('serverAddress');
+        if (addressInput && addressInput.value) {
+            var address = addressInput.value;
+            localStorage.setItem("serverAddress", address);
+            this.loadUrlInBrowser(this.prepareUrl(address));
+            this.toggleSettings();
+        } else {
+            alert("Please enter an address.");
+        }
+    },
+
+    prepareUrl: function(address) {
+        var url = address;
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+            url = 'http://' + url;
+        }
+        return url;
+    }
 };
 
 app.initialize();
