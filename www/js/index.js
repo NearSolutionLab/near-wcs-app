@@ -36,11 +36,23 @@ var app = {
   reconnectTimer: null,
   _rxBuf: "",
 
+  // 모드 플래그(HID 병행 시 사용)
+  useHID: false,
+
   // ====== 자동 엔터 동작 플래그 ======
   _autoEnter: true, // 필요없으면 false
 
   // (옵션) 접두 제거 정규식 (현재는 사용하지 않지만 필요 시 활용)
   prefixStripRegex: /^(?:\]?[A-Za-z][0-9]?\s+|[A-Za-z]\s+){1,3}(?=[A-Za-z0-9])/,
+
+  // ====== 재연결 백오프 ======
+  retry: { base: 3000, max: 60000, step: 0 }, // 3s → 6s → 12s … 최대 60s
+  nextDelay: function () {
+    var d = Math.min(this.retry.base * Math.pow(2, this.retry.step++), this.retry.max);
+    var jitter = Math.floor(d * 0.2 * Math.random()); // ±20% 지터
+    return d + jitter;
+  },
+  resetBackoff: function () { this.retry.step = 0; },
 
   initialize: function () {
     this.bindEvents();
@@ -59,6 +71,10 @@ var app = {
   },
 
   onDeviceReady: function () {
+    // PM5 MAC 복원 (있으면 이후 연결 시도 시 사용)
+    //var savedBt = localStorage.getItem('pm5.btaddr');
+    //if (savedBt) this.btAddr = savedBt;
+
     var serverAddress = localStorage.getItem("serverAddress");
     var addressInput  = document.getElementById("serverAddress");
 
@@ -252,11 +268,20 @@ var app = {
       const pm5 = devs.find(d => /PM5/i.test(d.name || ""));
       if (!pm5) return alert("PM5 스캐너를 찾을 수 없습니다. 먼저 페어링하세요.");
       this.btAddr = pm5.id || pm5.address;
+
+      // ★ MAC/이름 저장
+      if (this.btAddr) {
+        localStorage.setItem('pm5.btaddr', this.btAddr);
+        if (pm5.name) localStorage.setItem('pm5.btname', pm5.name);
+      }
+
       this.connectToScanner(this.btAddr);
     }, () => {});
   },
 
   connectToScanner: function (address) {
+    if (!address) { this.listDevices(); return; }
+
     try { bluetoothSerial.disconnect(()=>{},()=>{}); } catch(e){}
 
     const ab2str = (ab) => {
@@ -268,8 +293,14 @@ var app = {
     };
 
     const onConnected = () => {
+      console.log("[BT] CONNECTED:", address);
+      this.resetBackoff();
       this._rxBuf = "";
       try { bluetoothSerial.clear(); } catch(e){}
+
+      // ★ 연결 성공 시 MAC 저장(최신화)
+      this.btAddr = address;
+      localStorage.setItem('pm5.btaddr', this.btAddr);
 
       const onLine = (s) => this._accumulateAndSplit(s);
 
@@ -287,11 +318,17 @@ var app = {
       }, () => {});
     };
 
+    // SPP 모드일 때만 백오프 재시도, HID 모드면 그냥 종료
     const onFail = () => {
       bluetoothSerial.connect(address, onConnected, () => {
-        alert("스캐너 연결 실패");
-        clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = setTimeout(()=> this.connectToScanner(this.btAddr || address), 3000);
+        console.warn("스캐너 연결 실패 (", this.useHID ? "HID 모드" : "SPP 모드", ")");
+//        if (!this.useHID) {
+//          // SPP 모드일 때만 재시도
+//          clearTimeout(this.reconnectTimer);
+//          const delay = this.nextDelay();
+//          console.log("[BT] retry in", delay, "ms");
+//          this.reconnectTimer = setTimeout(()=> this.connectToScanner(this.btAddr || address), delay);
+//        }
       });
     };
 
@@ -391,7 +428,7 @@ var app = {
         form.querySelector('button[type="submit"],input[type="submit"]') ||
         form.querySelector('[data-testid*="submit" i], [data-action*="submit" i], .submit, [role="button"][aria-label*="submit" i]')
       )) || d.querySelector('button[type="submit"],input[type="submit"]');
-      if (btn && typeof btn.click === 'function') { try { btn.click(); } catch(_){} }
+      if (btn && typeof btn.click === 'function') { try { btn.click(); } catch(_ ){} }
 
     } catch (_) {}
   },
@@ -436,7 +473,7 @@ var app = {
                     form.querySelector('button[type="submit"],input[type="submit"]') ||
                     form.querySelector('[data-testid*="submit" i], [data-action*="submit" i], .submit, [role="button"][aria-label*="submit" i]')
                   )) || d.querySelector('button[type="submit"],input[type="submit"]');
-                  if (btn && btn.click) { try { btn.click(); } catch(_){} }
+                  if (btn && btn.click) { try { btn.click(); } catch(_ ){} }
                 })();
               }
             }catch(e){}
