@@ -285,10 +285,21 @@ var app = {
     try { bluetoothSerial.disconnect(()=>{},()=>{}); } catch(e){}
 
     const ab2str = (ab) => {
-      try { if (window.TextDecoder) return new TextDecoder().decode(new Uint8Array(ab)); }
+      try {
+        if (window.TextDecoder) {
+            // TextDecoder를 사용하여 디코딩하고 ETX(0x03) 문자를 제거합니다.
+            return new TextDecoder().decode(new Uint8Array(ab)).replace(/\x03/g, "");
+        }
+      }
       catch(_) {}
       var a = new Uint8Array(ab), s = '';
-      for (var i=0;i<a.length;i++) { var c=a[i]; if (c) s += String.fromCharCode(c); }
+      for (var i=0;i<a.length;i++) {
+           var c = a[i];
+           // 아스키 0x03(ETX) 문자를 건너뜁니다.
+           if (c !== 0x03) {
+               s += String.fromCharCode(c);
+           }
+      }
       return s;
     };
 
@@ -305,11 +316,13 @@ var app = {
       const onLine = (s) => this._accumulateAndSplit(s);
 
       // Delimiter 구독 + RAW 병행
-      bluetoothSerial.subscribe("\r\n", onLine, () => {
-        bluetoothSerial.subscribe("\r", onLine, () => {
-          bluetoothSerial.subscribe("\n", onLine, () => {/* only RAW */});
-        });
-      });
+      bluetoothSerial.subscribeRawData((ab) => {
+          try {
+            const txt = ab2str(ab).replace(/\x00/g, "");
+            this._accumulateAndSplit(txt);
+          } catch (e) {}
+        }, () => {});
+
       bluetoothSerial.subscribeRawData((ab) => {
         try {
           const txt = ab2str(ab).replace(/\x00/g, "");
@@ -338,6 +351,7 @@ var app = {
   _accumulateAndSplit: function (text) {
     if (!text) return;
     this._rxBuf += text;
+    // CRLF/CR/LF/TAB 등과 함께 ETX(0x03)를 명시적으로 분리 기준으로 추가합니다.
     const parts = this._rxBuf.split(/\r\n|[\r\n\t]|\x03/); // CRLF/CR/LF/TAB/ETX
     this._rxBuf = parts.pop();
 
