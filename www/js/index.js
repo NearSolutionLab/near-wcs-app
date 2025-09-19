@@ -46,13 +46,28 @@ var app = {
   prefixStripRegex: /^(?:\]?[A-Za-z][0-9]?\s+|[A-Za-z]\s+){1,3}(?=[A-Za-z0-9])/,
 
   // ====== 재연결 백오프 ======
-  retry: { base: 3000, max: 60000, step: 0 }, // 3s → 6s → 12s … 최대 60s
+  retry: { base: 3000, max: 60000, step: 0 },
   nextDelay: function () {
     var d = Math.min(this.retry.base * Math.pow(2, this.retry.step++), this.retry.max);
-    var jitter = Math.floor(d * 0.2 * Math.random()); // ±20% 지터
+    var jitter = Math.floor(d * 0.2 * Math.random());
     return d + jitter;
   },
   resetBackoff: function () { this.retry.step = 0; },
+
+  // ====== Code ID (N/P, ]C1 등) 단독 프레임 처리 ======
+  _cidPending: null,
+  _cidTimer: null,
+  _cidWindowMs: 150, // 다음 프레임 대기 시간(ms)
+
+  _isCodeIdFrame: function (s) {
+    if (!s) return false;
+    s = String(s).replace(/[\x00-\x1F\x7F]+/g,'').trim();
+    // a) 단일 영문자 Code ID (예: N, P, E, K 등)
+    if (/^[A-Za-z]$/.test(s)) return true;
+    // b) AIM ID (예: ]C1, ]E0)
+    if (/^\][A-Za-z][0-9]?$/.test(s)) return true;
+    return false;
+  },
 
   initialize: function () {
     this.bindEvents();
@@ -97,6 +112,11 @@ var app = {
   },
 
   loadUrlInBrowser: function (url) {
+    // ★ 페이지 전환 전 잔여 프레임/보류 상태 초기화 (진입 시 N/P 찍힘 방지)
+    this._rxBuf = "";
+    if (this._cidTimer) { clearTimeout(this._cidTimer); this._cidTimer = null; }
+    this._cidPending = null;
+
     if (this.inAppBrowserRef) {
       this.inAppBrowserRef.executeScript({ code: `window.location.href = "${url}"` });
       return;
@@ -106,7 +126,7 @@ var app = {
     this.inAppBrowserRef = browser;
 
     browser.addEventListener('loadstop', () => {
-      // IAB: 스캔값 처리 + 강화된 자동 엔터
+      // IAB: 스캔값 처리 + 자동 엔터 (+ 단일 Code ID 방지/선두 Code ID 스트립)
       browser.executeScript({
         code: `
           (function(){
@@ -118,27 +138,23 @@ var app = {
                 var el = d.activeElement || d.querySelector('input,textarea,[contenteditable="true"]');
                 if (!el) return;
 
-                // change/blur 트리거 유도
                 try {
                   el.dispatchEvent(new Event('change',{bubbles:true}));
                   el.blur(); setTimeout(function(){ el.focus(); }, 0);
                 } catch(_){}
 
-                // 키 이벤트 전송 (엘리먼트 → 문서)
                 ['keydown','keypress','keyup'].forEach(function(t){
                   var ev = new KeyboardEvent(t,{key:'Enter',code:'Enter',which:13,keyCode:13,bubbles:true,cancelable:true});
                   try { el.dispatchEvent(ev); } catch(_){}
                   try { d.dispatchEvent(ev); } catch(_){}
                 });
 
-                // form submit 시도 (이벤트 먼저, 막히면 프로그램 호출)
                 var form = el.form || (el.closest && el.closest('form'));
                 if (form) {
                   var ok = form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
                   if (ok && typeof form.submit === 'function') { try { form.submit(); } catch(_){} }
                 }
 
-                // submit 버튼 클릭 대체
                 var btn = (form && (
                   form.querySelector('button[type="submit"],input[type="submit"]') ||
                   form.querySelector('[data-testid*="submit" i], [data-action*="submit" i], .submit, [role="button"][aria-label*="submit" i]')
@@ -151,7 +167,17 @@ var app = {
               try {
                 var raw = ''+text;
 
-                // 0) zero-width/NBSP/개행류 정리(제어문자는 남겨 split 기준으로 사용)
+                // A) 제어문자가 있으면: 마지막 제어문자 이후만 취함 (가장 신뢰도 높음)
+                if (/[\\x00-\\x1F\\x7F]/.test(raw)) {
+                  var last = /[\\x00-\\x1F\\x7F](?!.*[\\x00-\\x1F\\x7F])/.exec(raw);
+                  if (last) raw = raw.slice(last.index + 1);
+                } else {
+                  // B) 제어문자가 없으면: 과잉 스트립 방지 위해 최소만 수행
+                  //   - 선두 AIM ID (]C1, ]E0 등) 1회 제거만 허용
+                  raw = raw.replace(/^\\][A-Za-z][0-9]?/, '');
+                }
+
+                // C) zero-width/NBSP/개행류 정리
                 var s0 = raw
                   .replace(/[\\u200B-\\u200D\\uFEFF]/g,'')
                   .replace(/\\u00A0/g,' ')
@@ -159,15 +185,21 @@ var app = {
                   .replace(/\\s{2,}/g,' ')
                   .trim();
 
-                // 1) 마지막 제어문자 이후만 채택
+                // D) 마지막 제어문자 이후 절단(보강)
                 var lastCtrl = s0.search(/[\\x00-\\x1F\\x7F](?!.*[\\x00-\\x1F\\x7F])/);
                 var s = (lastCtrl >= 0) ? s0.slice(lastCtrl + 1) : s0;
 
-                // 2) 잔여 제어문자/공백 제거
+                // E) 잔여 제어문자/공백 제거
                 s = s.replace(/[\\x00-\\x1F\\x7F]+/g,'').replace(/\\s+/g,'').trim();
 
+                // F) 보조: 선두 AIM ID 1회만 다시 확인/제거 (중복 안전)
+                s = s.replace(/^\\][A-Za-z][0-9]?/, '');
+
+                // 단일 영문만 남으면 무시 (Code ID 단독 프레임)
+                if (/^[A-Za-z]$/.test(s)) return;
+
                 var el = document.activeElement;
-                if (!el || (el.tagName!=='INPUT' && el.tagName!=='TEXTAREA' && el.contentEditable!=='true')) {
+                if (!el || (el.tagName!=='INPUT' && el.tagName!=='TEXTAREA' && el.isContentEditable!==true)) {
                   el = document.querySelector('input,textarea,[contenteditable="true"]');
                 }
                 if (el) {
@@ -230,6 +262,11 @@ var app = {
 
   initBluetooth: function () {
     try {
+      if (!window.bluetoothSerial) {
+        alert('Bluetooth Serial plugin not available');
+        return;
+      }
+
       const perms = cordova.plugins && cordova.plugins.permissions;
       const needPerms = perms ? [
         perms.BLUETOOTH_CONNECT,
@@ -258,9 +295,7 @@ var app = {
             () => bluetoothSerial.enable(() => this.listDevices(), e => alert("BT 활성화 실패: " + JSON.stringify(e)))
           );
         });
-    } catch (e) {
-      // 환경에 따라 플러그인 미존재 가능
-    }
+    } catch (e) {}
   },
 
   listDevices: function () {
@@ -269,7 +304,6 @@ var app = {
       if (!pm5) return alert("PM5 스캐너를 찾을 수 없습니다. 먼저 페어링하세요.");
       this.btAddr = pm5.id || pm5.address;
 
-      // ★ MAC/이름 저장
       if (this.btAddr) {
         localStorage.setItem('pm5.btaddr', this.btAddr);
         if (pm5.name) localStorage.setItem('pm5.btname', pm5.name);
@@ -287,42 +321,27 @@ var app = {
     const ab2str = (ab) => {
       try {
         if (window.TextDecoder) {
-            // TextDecoder를 사용하여 디코딩하고 ETX(0x03) 문자를 제거합니다.
-            return new TextDecoder().decode(new Uint8Array(ab)).replace(/\x03/g, "");
+          // UTF-8 디코딩 + ETX(0x03) 제거
+          return new TextDecoder().decode(new Uint8Array(ab)).replace(/\x03/g, "");
         }
-      }
-      catch(_) {}
+      } catch(_) {}
       var a = new Uint8Array(ab), s = '';
       for (var i=0;i<a.length;i++) {
-           var c = a[i];
-           // 아스키 0x03(ETX) 문자를 건너뜁니다.
-           if (c !== 0x03) {
-               s += String.fromCharCode(c);
-           }
+        var c = a[i];
+        if (c !== 0x03) s += String.fromCharCode(c); // ETX 제거
       }
       return s;
     };
 
     const onConnected = () => {
-      console.log("[BT] CONNECTED:", address);
       this.resetBackoff();
       this._rxBuf = "";
       try { bluetoothSerial.clear(); } catch(e){}
 
-      // ★ 연결 성공 시 MAC 저장(최신화)
       this.btAddr = address;
       localStorage.setItem('pm5.btaddr', this.btAddr);
 
-      const onLine = (s) => this._accumulateAndSplit(s);
-
-      // Delimiter 구독 + RAW 병행
-      bluetoothSerial.subscribeRawData((ab) => {
-          try {
-            const txt = ab2str(ab).replace(/\x00/g, "");
-            this._accumulateAndSplit(txt);
-          } catch (e) {}
-        }, () => {});
-
+      // RAW 구독 (중복 등록 없이 한 번만)
       bluetoothSerial.subscribeRawData((ab) => {
         try {
           const txt = ab2str(ab).replace(/\x00/g, "");
@@ -351,18 +370,39 @@ var app = {
   _accumulateAndSplit: function (text) {
     if (!text) return;
     this._rxBuf += text;
-    // CRLF/CR/LF/TAB 등과 함께 ETX(0x03)를 명시적으로 분리 기준으로 추가합니다.
-    const parts = this._rxBuf.split(/\r\n|[\r\n\t]|\x03/); // CRLF/CR/LF/TAB/ETX
+
+    // CRLF/CR/LF/TAB/ETX 기준 분리
+    const parts = this._rxBuf.split(/\r\n|[\r\n\t]|\x03/);
     this._rxBuf = parts.pop();
 
-    for (const p of parts) {
-      // ① 제어문자만 온 경우(엔터 전용 바코드) → 강제 엔터
-      if (/^[\x00-\x1F\x7F]+$/.test(p)) {
+    for (const pRaw of parts) {
+      const p = String(pRaw).replace(/[\x00-\x1F\x7F]+/g,'').trim();
+
+      // ① 제어문자만 온 경우(엔터 전용) → 엔터 트리거
+      if (p.length === 0 && /[\x00-\x1F\x7F]/.test(pRaw)) {
         if (this._autoEnter) this._triggerEnter(window);
         continue;
       }
-      // ② 일반 스캔 처리
-      const code = this.normalizeBarcode(p);
+
+      // ② Code ID 단독 프레임(N, P, ]C1 등) 보류/폐기
+      if (this._isCodeIdFrame(p)) {
+        if (this._cidTimer) { clearTimeout(this._cidTimer); this._cidTimer = null; }
+        this._cidPending = p;
+        this._cidTimer = setTimeout(() => {
+          this._cidPending = null;
+          this._cidTimer = null;
+        }, this._cidWindowMs);
+        continue;
+      }
+
+      // ③ 실제 바코드 도착 시 직전 Code ID 보류 폐기
+      if (this._cidPending) {
+        if (this._cidTimer) { clearTimeout(this._cidTimer); this._cidTimer = null; }
+        this._cidPending = null;
+      }
+
+      // ④ 실제 바코드 정규화(원본 프레임 사용) → 주입
+      const code = this.normalizeBarcode(pRaw);
       if (code) this.handleBarcode(code);
     }
 
@@ -386,24 +426,37 @@ var app = {
     } catch (e) {}
   },
 
-  // '마지막 제어문자 이후만 채택' → 잔여 제어문자/공백 제거
+  // '마지막 제어문자 이후만 채택' → 잔여 제어문자/공백 제거 + (AIM ID만 1회 제거)
   normalizeBarcode: function (raw) {
     if (!raw) return raw;
+    raw = String(raw);
 
-    let s0 = String(raw)
+    // A) 제어문자가 섞여 있으면: 마지막 제어문자 이후만 취함
+    if (/[\x00-\x1F\x7F]/.test(raw)) {
+      const last = /[\x00-\x1F\x7F](?!.*[\x00-\x1F\x7F])/.exec(raw);
+      if (last) raw = raw.slice(last.index + 1);
+    } else {
+      // B) 제어문자가 없으면: 선두 AIM ID만 1회 제거 (N/P 제거 규칙 삭제)
+      raw = raw.replace(/^\][A-Za-z][0-9]?/, '');
+    }
+
+    // C) zero-width/NBSP/개행류 정리
+    let s0 = raw
       .replace(/[\u200B-\u200D\uFEFF]/g, '')
       .replace(/\u00A0/g, ' ')
       .replace(/[\r\n\t]+/g, ' ')
       .replace(/\s{2,}/g, ' ')
       .trim();
 
+    // D) 마지막 제어문자 이후로 한 번 더 절단
     const m = /[\x00-\x1F\x7F](?!.*[\x00-\x1F\x7F])/.exec(s0);
     let s = m ? s0.slice(m.index + 1) : s0;
 
-    s = s
-      .replace(/[\x00-\x1F\x7F]+/g, '')
-      .replace(/\s+/g, '')
-      .trim();
+    // E) 잔여 제어문자/공백 제거
+    s = s.replace(/[\x00-\x1F\x7F]+/g, '').replace(/\s+/g, '').trim();
+
+    // F) 보조: 선두 AIM ID 1회만 재확인
+    s = s.replace(/^\][A-Za-z][0-9]?/, '');
 
     return s;
   },
@@ -417,27 +470,23 @@ var app = {
       }
       if (!el) return;
 
-      // change/blur → focus 토글 (일부 UI가 blur에서만 반응)
       try {
         el.dispatchEvent(new Event('change',{bubbles:true}));
         el.blur(); setTimeout(() => { try { el.focus(); } catch(_){} }, 0);
       } catch(_){}
 
-      // 키 이벤트(엘리먼트, 문서)
       ['keydown','keypress','keyup'].forEach((t) => {
         const ev = new KeyboardEvent(t, { key: "Enter", code: "Enter", which: 13, keyCode: 13, bubbles: true, cancelable: true });
         try { el.dispatchEvent(ev); } catch(_){}
         try { d.dispatchEvent(ev); } catch(_){}
       });
 
-      // form submit (이벤트 → 프로그래매틱 콜)
       const form = el.form || (el.closest && el.closest("form"));
       if (form) {
         const ok = form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
         if (ok && typeof form.submit === "function") { try { form.submit(); } catch(_){} }
       }
 
-      // submit 버튼 클릭 대체
       const btn = (form && (
         form.querySelector('button[type="submit"],input[type="submit"]') ||
         form.querySelector('[data-testid*="submit" i], [data-action*="submit" i], .submit, [role="button"][aria-label*="submit" i]')
@@ -449,6 +498,8 @@ var app = {
 
   handleBarcode: function (code) {
     if (!code) return;
+    // 단일 Code ID만 남은 결과는 최종 주입 차단
+    if (/^[A-Za-z]$/.test(code)) return;
 
     if (this.inAppBrowserRef) {
       const payload = JSON.stringify(code);
@@ -458,16 +509,15 @@ var app = {
             try{
               var d = document;
               var el = d.activeElement;
-              if (!el || (el.tagName!=='INPUT' && el.tagName!=='TEXTAREA' && el.contentEditable!=='true')) {
+              if (!el || (el.tagName!=='INPUT' && el.tagName!=='TEXTAREA' && el.isContentEditable!==true)) {
                 el = d.querySelector('input,textarea,[contenteditable="true"]');
               }
               if (el) {
+                if (/^[A-Za-z]$/.test(s)) return;
                 el.focus();
                 el.value = s;
                 el.dispatchEvent(new Event('input',{bubbles:true}));
                 el.dispatchEvent(new Event('change',{bubbles:true}));
-
-                // 강화된 자동 엔터
                 (function(){
                   try{
                     el.dispatchEvent(new Event('change',{bubbles:true}));
