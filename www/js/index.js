@@ -371,43 +371,28 @@ var app = {
     if (!text) return;
     this._rxBuf += text;
 
-    // CRLF/CR/LF/TAB/ETX 기준 분리
-    const parts = this._rxBuf.split(/\r\n|[\r\n\t]|\x03/);
+    // CRLF, CR, LF, TAB, ETX 기준으로 분리
+    const parts = this._rxBuf.split(/\r\n|\r|\n|\t|\x03/);
     this._rxBuf = parts.pop();
 
     for (const pRaw of parts) {
-      const p = String(pRaw).replace(/[\x00-\x1F\x7F]+/g,'').trim();
+      // 바코드 정규화 (제어문자 제거, AIM ID 제거 등)
+      const cleaned = this.normalizeBarcode(pRaw);
 
-      // ① 제어문자만 온 경우(엔터 전용) → 엔터 트리거
-      if (p.length === 0 && /[\x00-\x1F\x7F]/.test(pRaw)) {
-        if (this._autoEnter) this._triggerEnter(window);
-        continue;
-      }
+      // 결과가 없으면 무시 (CR/LF 단독 프레임 → Enter 강제 발생시키지 않음)
+      if (!cleaned) continue;
 
-      // ② Code ID 단독 프레임(N, P, ]C1 등) 보류/폐기
-      if (this._isCodeIdFrame(p)) {
-        if (this._cidTimer) { clearTimeout(this._cidTimer); this._cidTimer = null; }
-        this._cidPending = p;
-        this._cidTimer = setTimeout(() => {
-          this._cidPending = null;
-          this._cidTimer = null;
-        }, this._cidWindowMs);
-        continue;
-      }
-
-      // ③ 실제 바코드 도착 시 직전 Code ID 보류 폐기
-      if (this._cidPending) {
-        if (this._cidTimer) { clearTimeout(this._cidTimer); this._cidTimer = null; }
-        this._cidPending = null;
-      }
-
-      // ④ 실제 바코드 정규화(원본 프레임 사용) → 주입
-      const code = this.normalizeBarcode(pRaw);
-      if (code) this.handleBarcode(code);
+      // 정상 바코드만 처리
+      this.handleBarcode(cleaned);
     }
 
-    if (this._rxBuf.length > 8192) this._rxBuf = this._rxBuf.slice(-2048);
+    // 버퍼 누적 제한
+    if (this._rxBuf.length > 8192) {
+      this._rxBuf = this._rxBuf.slice(-2048);
+    }
   },
+
+
 
   /* ================= 주입/정규화/엔터 ================= */
 
